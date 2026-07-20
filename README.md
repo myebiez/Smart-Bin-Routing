@@ -1,237 +1,321 @@
-# Eksekusi Simulasi Online Smart Bin (Wokwi & Node-RED)
+Panduan Lengkap: Sistem Analitik HRD Smart Bin End-to-End
 
-Mari kita langsung bedah dan praktikkan eksekusi simulasi online ini dari nol. Kita akan membagi meja kerja menjadi dua: **Meja Hardware (Wokwi)** dan **Meja Backend/UI (Node-RED & SQLite)**.
+TAHAP 1: Persiapan Database untuk Aplikasi HRD
 
-## 1. Meja Hardware: Simulasi Wokwi (Fase 1, 2, & 4)
+Kita tidak lagi hanya membuat log, tetapi Sistem Analitik HRD. HRD butuh data jelas untuk menegur atau memberi bonus pada vendor cleaning service.
 
-Karena Wokwi tidak memiliki modul Raspberry Pi Zero W (Linux), Hardware Engineer 1 akan menggunakan **Raspberry Pi Pico (MicroPython)**. Logika pemrograman OOP dan I/O-nya 100% sama dengan Pi Zero W, sehingga kodenya nanti bisa langsung di-copy-paste ke perangkat asli.
+Buka aplikasi DB Browser for SQLite di laptop Anda.
 
-### A. Persiapan Komponen di Wokwi.com
+Buat database baru bernama smartbin_enterprise.db.
 
-Buat proyek baru berbasis **Raspberry Pi Pico (MicroPython)** di Wokwi, lalu tambahkan komponen berikut di menu `+ Add Component`:
+Buka tab Execute SQL, copy-paste kode di bawah ini, dan klik tombol Play (Run). Klik Write Changes untuk menyimpan.
 
-- **Slide Potentiometer** (Sebagai pengganti sensor berat/Load Cell untuk simulasi geser cepat 0–15 Kg).
-- **Servo (MG90S)** (Untuk aktuator Smart Lock).
-- **Push Button** (Sebagai pengganti tap kartu RFID Budi).
-- **Buzzer & LED Merah**.
+-- Clean Database Schema untuk Audit HRD
+CREATE TABLE hr_performance_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    waktu_kejadian DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id_tong TEXT NOT NULL,
+    nama_petugas TEXT NOT NULL,
+    pemicu_penuh TEXT NOT NULL, -- 'BERAT_MAKSIMAL' atau 'VOLUME_MAKSIMAL'
+    waktu_respon_detik INTEGER NOT NULL,
+    status_sla TEXT NOT NULL -- 'PASS' (Lulus) atau 'FAIL' (Terlambat)
+);
 
-### B. Kode MicroPython (`main.py`)
 
-Salin kode berarsitektur _Clean Code_ berikut ke editor Wokwi. Kode ini otomatis mengelola Fase 1 (Normal), Fase 2 (Lockdown pada 10 Kg), dan Fase 4 (RFID Tap & Unlock).
+TAHAP 2: Koding Hardware Wokwi (Pendekatan Clean Code & OOP)
 
-```
+Buka Wokwi.com, buat proyek Raspberry Pi Pico (MicroPython).
+
+Wiring Komponen:
+
+HC-SR04 (Ultrasonik/Volume): TRIG ke GP3, ECHO ke GP2.
+
+Slide Potentiometer (Berat): SIG ke GP26.
+
+Servo (Kunci Pintu): PWM ke GP15.
+
+Push Button (RFID Petugas): Satu kaki ke GP14, satu ke GND.
+
+LED Merah & Buzzer: LED ke GP13, Buzzer ke GP12. Hubungkan semua VCC dan GND.
+
+Kode main.py (Clean Code & OOP):
+Hapus semua kode bawaan, paste kode di bawah ini. Perhatikan bagaimana nama fungsi dan variabel menjelaskan dirinya sendiri, sehingga komentar hanya digunakan untuk konteks bisnis.
+
 import machine
 import time
 import json
 
-class SmartBinSimulation:
-    def __init__(self):
-        # Setup Pin I/O
-        self.load_cell_slider = machine.ADC(26) # Pin GP26 (A0)
-        self.servo = machine.PWM(machine.Pin(15))
-        self.servo.freq(50)
-        self.rfid_button = machine.Pin(14, machine.Pin.IN, machine.Pin.PULL_UP)
-        self.led_red = machine.Pin(13, machine.Pin.OUT)
-        self.buzzer = machine.Pin(12, machine.Pin.OUT)
+class BinConfig:
+    BIN_ID = "BIN-LOBBY-01"
+    MAX_WEIGHT_KG = 10.0
+    MIN_DISTANCE_CM = 15.0 # Jarak dari sensor ke puncak sampah. <15cm berarti penuh.
+    SERVO_LOCKED = 4800
+    SERVO_UNLOCKED = 1600
+
+class WeightSensor:
+    def __init__(self, pin_number):
+        self.adc = machine.ADC(pin_number)
         
-        self.bin_id = "01"
-        self.max_weight = 10.0
+    def get_weight_in_kg(self):
+        raw_value = self.adc.read_u16()
+        # Mengonversi sinyal analog menjadi rentang 0 - 15 Kg
+        return round((raw_value / 65535.0) * 15.0, 1)
+
+class VolumeSensor:
+    def __init__(self, trigger_pin, echo_pin):
+        self.trigger = machine.Pin(trigger_pin, machine.Pin.OUT)
+        self.echo = machine.Pin(echo_pin, machine.Pin.IN)
+        
+    def get_empty_space_in_cm(self):
+        # Menembakkan gelombang suara pendek
+        self.trigger.low()
+        time.sleep_us(2)
+        self.trigger.high()
+        time.sleep_us(5)
+        self.trigger.low()
+        
+        # Mengukur waktu pantulan untuk menentukan jarak
+        while self.echo.value() == 0:
+            signal_off = time.ticks_us()
+        while self.echo.value() == 1:
+            signal_on = time.ticks_us()
+            
+        time_passed = signal_on - signal_off
+        return round((time_passed * 0.0343) / 2, 1)
+
+class SecurityActuator:
+    def __init__(self, servo_pin, led_pin, buzzer_pin):
+        self.servo = machine.PWM(machine.Pin(servo_pin))
+        self.servo.freq(50)
+        self.alert_led = machine.Pin(led_pin, machine.Pin.OUT)
+        self.buzzer = machine.Pin(buzzer_pin, machine.Pin.OUT)
         self.is_locked = False
-        self.unlock_door()
+        self.unlock_bin()
 
-    def read_weight_kg(self):
-        # Konversi nilai ADC (0-65535) ke simulasi berat (0 - 15 Kg)
-        raw_val = self.load_cell_slider.read_u16()
-        return round((raw_val / 65535.0) * 15.0, 1)
-
-    def lock_door(self):
-        self.servo.duty_u16(4800) # Sudut 90 derajat (Terkunci)
-        self.led_red.value(1)
+    def lock_bin(self):
+        self.servo.duty_u16(BinConfig.SERVO_LOCKED)
+        self.alert_led.value(1)
         self.is_locked = True
 
-    def unlock_door(self):
-        self.servo.duty_u16(1600) # Sudut 0 derajat (Terbuka)
-        self.led_red.value(0)
+    def unlock_bin(self):
+        self.servo.duty_u16(BinConfig.SERVO_UNLOCKED)
+        self.alert_led.value(0)
         self.is_locked = False
 
-    def beep(self, duration=0.1, times=1):
+    def play_success_chime(self):
+        self._sound_buzzer(duration=0.1, times=2)
+
+    def play_alert_chime(self):
+        self._sound_buzzer(duration=0.4, times=1)
+
+    def _sound_buzzer(self, duration, times):
         for _ in range(times):
             self.buzzer.value(1)
             time.sleep(duration)
             self.buzzer.value(0)
             time.sleep(0.1)
 
-    def send_lora_payload(self, status, weight, janitor=""):
+class Telemetry:
+    def transmit(self, status, trigger_reason, weight, distance, janitor_name=""):
         payload = {
-            "id_tong": self.bin_id,
+            "id_tong": BinConfig.BIN_ID,
             "status": status,
-            "berat": weight,
-            "petugas": janitor
+            "alasan": trigger_reason,
+            "berat_kg": weight,
+            "jarak_cm": distance,
+            "petugas": janitor_name
         }
-        # Mencetak format JSON ke Serial Monitor (Simulasi pancaran radio LoRa)
+        # Simulasi transmisi LoRa ke Node-RED
         print("LORA_TX:" + json.dumps(payload))
 
-    def run(self):
-        print("Sistem Smart Bin Aktif. Geser slider berat...")
+class SmartBinController:
+    def __init__(self):
+        self.weight_sensor = WeightSensor(pin_number=26)
+        self.volume_sensor = VolumeSensor(trigger_pin=3, echo_pin=2)
+        self.actuator = SecurityActuator(servo_pin=15, led_pin=13, buzzer_pin=12)
+        self.rfid_scanner = machine.Pin(14, machine.Pin.IN, machine.Pin.PULL_UP)
+        self.telemetry = Telemetry()
+
+    def check_capacity(self, current_weight, current_distance):
+        if current_weight >= BinConfig.MAX_WEIGHT_KG:
+            return "BERAT_MAKSIMAL"
+        elif current_distance <= BinConfig.MIN_DISTANCE_CM:
+            return "VOLUME_MAKSIMAL"
+        return "AMAN"
+
+    def run_system(self):
+        print("Sistem Smart Bin Aktif. Memantau Sensor...")
+        
         while True:
-            weight = self.read_weight_kg()
+            weight = self.weight_sensor.get_weight_in_kg()
+            distance = self.volume_sensor.get_empty_space_in_cm()
+            capacity_status = self.check_capacity(weight, distance)
 
-            # FASE 2: TRIGGER & LOCKDOWN
-            if weight >= self.max_weight and not self.is_locked:
-                self.lock_door()
-                self.beep(0.3, 1)
-                self.send_lora_payload("PENUH", weight)
-                print(">> [ALERT] Tong Penuh & Terkunci Otomatis! <<")
+            # Skenario 1: Tong Penuh (Triggered by Weight OR Volume)
+            if capacity_status != "AMAN" and not self.actuator.is_locked:
+                self.actuator.lock_bin()
+                self.actuator.play_alert_chime()
+                self.telemetry.transmit("PENUH", capacity_status, weight, distance)
+                print(f">> [ALERT] Terkunci Otomatis! Pemicu: {capacity_status} <<")
 
-            # FASE 4: AUDIT (Simulasi Tombol RFID di-tap saat tong penuh)
-            if self.is_locked and self.rfid_button.value() == 0:
-                time.sleep(0.05) # Debounce
-                if self.rfid_button.value() == 0:
-                    print(">> [AUDIT] Kartu RFID Budi Terdeteksi! <<")
-                    self.beep(0.1, 2)
-                    self.unlock_door()
-                    # Menunggu petugas mengosongkan sampah (slider digeser ke < 1 Kg)
-                    print(">> Menunggu sampah diangkat...")
-                    while self.read_weight_kg() > 1.0:
+            # Skenario 2: Petugas Datang Tap Kartu (Audit)
+            if self.actuator.is_locked and self.rfid_scanner.value() == 0:
+                time.sleep(0.05) # Debounce mekanis
+                if self.rfid_scanner.value() == 0:
+                    print(">> [AUDIT] Kartu Petugas Diterima. Membuka Kunci... <<")
+                    self.actuator.play_success_chime()
+                    self.actuator.unlock_bin()
+                    
+                    # Sistem menunggu sampai petugas mengangkat plastik sampah
+                    # (Berat kembali 0 dan jarak ruang kosong kembali maksimal)
+                    while self.weight_sensor.get_weight_in_kg() > 1.0 or \
+                          self.volume_sensor.get_empty_space_in_cm() < 30.0:
                         time.sleep(0.5)
                     
-                    # FASE 5: RESET
-                    self.send_lora_payload("KOSONG", 0.0, "Budi")
-                    print(">> [RESET] Sampah Bersih. Sinyal dikirim via LoRa! <<")
+                    self.telemetry.transmit("KOSONG", "PEMBERSIHAN", 0.0, 50.0, "Siti")
+                    print(">> [RESET] Selesai. Transmisi Laporan HRD Terkirim! <<")
             
             time.sleep(0.2)
 
 if __name__ == "__main__":
-    bin_system = SmartBinSimulation()
-    bin_system.run()
-```
+    bin_system = SmartBinController()
+    bin_system.run_system()
 
-## 2. Meja Backend: Setup SQLite & Node-RED (Fase 3 & 5)
 
-Backend Engineer dan UI/UX Designer akan bekerja di laptop lokal.
+TAHAP 3: Koding Node-RED (Pendekatan Krug "Don't Make Me Think")
 
-### A. Persiapan Database SQLite (Terminal Laptop)
+Buka Node-RED (localhost:1880). Kita akan membuat kode ES6 Class JavaScript di Function Node untuk menganalisis data, membaginya untuk UI Satpam (Operasional) dan UI HRD (Analitik).
 
-Buka Terminal / Command Prompt di laptop, lalu buat file database baru dan tabel audit yang memiliki kolom `durasi_respon_detik` _(Killer Feature SLA)_:
+Tarik Inject Node (Beri nama: Simulasi LORA PENUH). Isi Payload JSON:
+{"id_tong": "BIN-LOBBY-01", "status": "PENUH", "alasan": "VOLUME_MAKSIMAL", "berat_kg": 2, "jarak_cm": 10, "petugas": ""}
 
-```
-sqlite3 smartbin_audit.db
-```
+Tarik Inject Node kedua (Beri nama: Simulasi LORA KOSONG). Isi Payload JSON:
+{"id_tong": "BIN-LOBBY-01", "status": "KOSONG", "alasan": "PEMBERSIHAN", "berat_kg": 0, "jarak_cm": 50, "petugas": "Siti"}
 
-Di dalam perintah SQLite, jalankan kueri ini:
+Tarik Function Node dan letakkan kode Clean Code JavaScript ini:
 
-```
-CREATE TABLE audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    id_tong TEXT NOT NULL,
-    status TEXT NOT NULL,
-    berat REAL NOT NULL,
-    petugas TEXT DEFAULT 'SYSTEM',
-    durasi_respon_detik INTEGER DEFAULT 0
-);
-.exit
-```
+class SlaAnalyzer {
+    constructor(nodeMessage, nodeFlow) {
+        this.payload = nodeMessage.payload;
+        this.flow = nodeFlow;
+        this.currentTime = new Date();
+        this.SLA_LIMIT_SECONDS = 300; // Target HRD: 5 Menit
+    }
 
-### B. Desain Flow Node-RED & Logika SLA (Killer Feature)
+    isBinFull() {
+        return this.payload.status === "PENUH";
+    }
 
-Buka Node-RED di browser (`http://localhost:1880`). Susun alur flow dengan susunan node seperti berikut:
+    isBinEmptied() {
+        return this.payload.status === "KOSONG";
+    }
 
-```
-[Inject: Simulasi LoRa] ──► [JSON Parser] ──► [Function: SLA & Routing Logic] ──├─► [UI Dashboard (Gauge & Status)]
-                                                                                ├─► [Telegram Bot Sender]
-                                                                                └─► [SQLite Database Node]
-```
+    recordFullTime() {
+        this.flow.set(`time_full_${this.payload.id_tong}`, this.currentTime.getTime());
+    }
 
-**Kode untuk Node Function: SLA & Routing Logic:** Masukkan skrip JavaScript berikut ke dalam Function Node. Kode ini bertanggung jawab menangkap _Timestamp A_ (Saat Penuh) dan menghitung selisihnya dengan _Timestamp B_ (Saat Bersih) untuk menghasilkan durasi respon SLA:
+    calculateResponseDuration() {
+        let timeFull = this.flow.get(`time_full_${this.payload.id_tong}`) || this.currentTime.getTime();
+        this.flow.set(`time_full_${this.payload.id_tong}`, null); // Reset
+        return Math.round((this.currentTime.getTime() - timeFull) / 1000);
+    }
 
-```
-let payload = msg.payload;
-let now = new Date();
+    evaluateSlaStatus(durationInSeconds) {
+        return durationInSeconds <= this.SLA_LIMIT_SECONDS ? 'PASS' : 'FAIL';
+    }
 
-// FASE 3: ROUTING & NOTIFIKASI (PENUH)
-if (payload.status === "PENUH") {
-    // 1. Simpan Timestamp A ke dalam memori global Node-RED
-    flow.set("waktu_penuh_" + payload.id_tong, now.getTime());
+    // Pendekatan Krug: UI untuk Satpam/Ops harus langsung terbaca, tanpa berpikir.
+    getOperationalUiUpdate(isFull) {
+        if (isFull) {
+            return {
+                topic: "Status " + this.payload.id_tong,
+                payload: this.payload.berat_kg,
+                ui_control: { background: "#D32F2F" }, // Merah = Bahaya
+                status_text: `🚨 PENUH (${this.payload.alasan.replace('_', ' ')})`
+            };
+        } else {
+            return {
+                topic: "Status " + this.payload.id_tong,
+                payload: 0,
+                ui_control: { background: "#388E3C" }, // Hijau = Aman
+                status_text: "🟢 AMAN - TERBUKA"
+            };
+        }
+    }
+}
 
-    // 2. Siapkan data untuk tampilan UI Dashboard (Merah)
-    let uiMsg = {
-        topic: "Status Tong " + payload.id_tong,
-        payload: payload.berat,
-        ui_control: { background: "#D32F2F" },
-        status_label: "🚨 PENUH - TERKUNCI"
-    };
+const analyzer = new SlaAnalyzer(msg, flow);
 
-    // 3. Siapkan pesan untuk Telegram Bot
+if (analyzer.isBinFull()) {
+    analyzer.recordFullTime();
+    
+    let uiMsg = analyzer.getOperationalUiUpdate(true);
+    
     let telegramMsg = {
         payload: {
-            chatId: "ID_CHAT_GRUP_KALIAN",
-            text: `🚨 *URGENT: TONG ${payload.id_tong} PENUH (${payload.berat} Kg)*\n📍 *Lokasi:* Lantai 1 Area Foodcourt\n🔒 *Status:* Sistem terkunci otomatis.\n👉 Mohon segera tap RFID untuk pembersihan.`,
-            parse_mode: "Markdown"
+            chatId: "ID_GRUP_ANDA",
+            parse_mode: "Markdown",
+            text: `🚨 *URGENT: ${analyzer.payload.id_tong} PENUH*\n` +
+                  `Pemicu: *${analyzer.payload.alasan}*\n` +
+                  `Petugas diminta segera menuju LOBBY.`
         }
     };
+    return [uiMsg, telegramMsg, null];
 
-    return [uiMsg, telegramMsg, null]; // Kirim ke UI & Telegram
-}
-// FASE 5: RESET & LOGGING (KOSONG)
-else if (payload.status === "KOSONG") {
-    // 1. Ambil Timestamp A dari memori global
-    let waktuPenuh = flow.get("waktu_penuh_" + payload.id_tong) || now.getTime();
+} else if (analyzer.isBinEmptied()) {
+    let responseTime = analyzer.calculateResponseDuration();
+    let slaStatus = analyzer.evaluateSlaStatus(responseTime);
     
-    // 2. Hitung durasi respon SLA (Timestamp B - Timestamp A) dalam detik
-    let selisihDetik = Math.round((now.getTime() - waktuPenuh) / 1000);
+    let uiMsg = analyzer.getOperationalUiUpdate(false);
     
-    // 3. Reset memori waktu
-    flow.set("waktu_penuh_" + payload.id_tong, null);
-
-    // 4. Siapkan data untuk UI Dashboard (Hijau)
-    let uiMsg = {
-        topic: "Status Tong " + payload.id_tong,
-        payload: 0.0,
-        ui_control: { background: "#388E3C" },
-        status_label: "🟢 NORMAL - TERBUKA"
-    };
-
-    // 5. Siapkan kueri SQL untuk dicatat ke SQLite Database
-    let sqlQuery = `INSERT INTO audit_logs (id_tong, status, berat, petugas, durasi_respon_detik) 
-                    VALUES ('${payload.id_tong}', 'BERSIH', ${payload.berat}, '${payload.petugas}', ${selisihDetik});`;
+    // Kirim data murni ke Database Aplikasi HRD
+    let sqlQuery = `INSERT INTO hr_performance_audit 
+        (id_tong, nama_petugas, pemicu_penuh, waktu_respon_detik, status_sla) 
+        VALUES ('${analyzer.payload.id_tong}', '${analyzer.payload.petugas}', 'TERCATAT', ${responseTime}, '${slaStatus}');`;
     
     let dbMsg = { topic: sqlQuery };
-
-    return [uiMsg, null, dbMsg]; // Kirim ke UI & Database
+    return [uiMsg, null, dbMsg];
 }
 
 return null;
-```
 
-## 3. Buku Panduan Simulasi (Cara Kerja Tim Hari Ini)
 
-Sekarang, kedua bagian sudah siap. Begini cara tim melakukan Simulasi Hybrid 5 Fase secara langsung:
+TAHAP 4: Membangun UI Dashboard Node-RED (Don't Make Me Think)
 
-### Langkah 1: Tes Kondisi Normal (Fase 1)
+Kita akan membuat 2 Tab. Satu untuk Satpam, satu untuk Aplikasi HRD.
 
-- **Di Wokwi:** Klik **Start Simulation**. Geser slider potensiometer di bawah angka pertengahan (misal set setara 4.5 Kg).
-- **Hasil:** Servo berada di sudut 0° (Pintu Terbuka). LED Merah mati.
+Di Node-RED, sambungkan output 1 Function Node ke Gauge Node (Tab: Operasional).
 
-### Langkah 2: Trigger & Lockdown (Fase 2 & 3)
+Sambungkan output 1 juga ke Text Node (Tab: Operasional, untuk tulisan status).
 
-- **Di Wokwi:** Geser slider potensiometer hingga ke atas (set setara 11.2 Kg).
-- **Hasil Wokwi:** Servo langsung bergerak berputar ke 90° (Pintu Terkunci/Lockdown!). LED Merah menyala. Di Serial Monitor muncul teks: `LORA_TX:{"id_tong": "01", "status": "PENUH", "berat": 11.2, "petugas": ""}`
-- **Aksi Tim:** Salin teks JSON `{"id_tong": "01", ...}` dari Wokwi tersebut, lalu _paste_ ke dalam Inject Node di Node-RED laptop kalian dan klik tombol **Inject**.
-- **Hasil Node-RED:**
-    - Layar Dashboard UI berubah menjadi **MERAH** solid.
-    - HP Petugas bergetar menerima notifikasi pesan Telegram!
-    - Node-RED diam-diam mencatat _Timestamp A_ di latar belakang.
+Sambungkan output 2 ke Telegram Sender Node.
 
-### Langkah 3: Eksekusi Audit & Hitung SLA (Fase 4 & 5)
+Sambungkan output 3 ke SQLite Node (Arahkan ke smartbin_enterprise.db).
 
-- **Di Wokwi:** Biarkan simulasi berjalan beberapa saat (misal tunggu 15 detik seolah-olah Budi sedang berjalan menuju lokasi). Lalu, **Klik Push Button** di Wokwi (simulasi Budi menempelkan kartu RFID).
-- **Hasil Wokwi:** Buzzer bunyi _Beep! Beep!_, Servo terbuka kembali ke sudut 0°.
-- **Aksi Tim:** Geser slider potensiometer kembali ke paling bawah (0 Kg). Di Serial Monitor Wokwi otomatis muncul teks baru: `LORA_TX:{"id_tong": "01", "status": "KOSONG", "berat": 0.0, "petugas": "Budi"}`
-- **Aksi Tim:** Salin JSON baru tersebut ke Inject Node kedua di Node-RED dan klik **Inject**.
-- **Hasil Akhir Node-RED:**
-    - Dashboard UI kembali menjadi **HIJAU**.
-    - Buka terminal database SQLite kalian, jalankan perintah `SELECT * FROM audit_logs;`.
-    - Kalian akan melihat baris data baru tercatat dengan sempurna: `1 | 2026-07-20 13:30:00 | 01 | BERSIH | 0.0 | Budi | 15` _(Angka 15 di akhir adalah durasi respon 15 detik dari sistem SLA yang kalian rancang!)_
+Aplikasi HRD: Buat Inject Node berulang setiap 5 detik (Timestamp) $\rightarrow$ Sambungkan ke SQLite Node dengan kueri SELECT * FROM hr_performance_audit ORDER BY id DESC LIMIT 5; $\rightarrow$ Sambungkan hasilnya ke ui_table Node (Letakkan di Tab: HRD Dashboard).
 
-> 💡 **Kesimpulan:** Dengan melakukan simulasi manual _copy-paste stream serial_ ini, kalian sudah membuktikan ketahanan logika arsitektur software kalian 100% sebelum mengeluarkan uang sepeser pun untuk menyolder hardware!
+Klik Deploy. Buka http://localhost:1880/ui.
+
+TAHAP 5: Cara Melakukan Presentasi / Simulasi End-to-End
+
+Saat Anda demo di depan orang atau juri, lakukan ini:
+
+Tunjukkan Dashboard Ops (Satpam): Buka UI Node-RED. Warnanya hijau (Aman).
+
+Mulai Simulasi Wokwi: Buka Wokwi, tekan Play.
+
+Demo Volume Penuh (Penting!): Geser slider Jarak (Ultrasonik) ke 10 cm. Berat biarkan kecil (misal 2 kg).
+
+Sebutkan ke Juri: "Seringkali pengunjung membuang kardus atau botol kosong. Beratnya ringan, tapi memakan tempat. Sensor ultrasonik kita mencegah tong luber meski belum 10kg."
+
+Tunjukkan Interaksi DOET: Tong akan terkunci otomatis, LED Merah menyala. Signifier visual yang sangat jelas bagi pengunjung bahwa tong tidak bisa dipakai.
+
+Tunjukkan Node-RED: Klik Inject Node PENUH. Dashboard Ops seketika berubah MERAH, Telegram masuk. "Satpam tidak perlu mikir, warna merah berarti ada masalah." (Prinsip Steve Krug).
+
+Demo Audit (HRD): Di Wokwi, tunggu 10 detik, lalu klik tombol (simulasi tap kartu Siti). Pintu terbuka, bunyi Beep. Geser jarak ke 50cm (kosong).
+
+Selesaikan: Klik Inject Node KOSONG di Node-RED.
+
+Pukulan Terakhir (Aplikasi HRD): Buka Tab HRD Dashboard di UI Node-RED Anda. Tunjukkan tabel yang baru saja ter-update: Siti membersihkan tong dalam 10 detik, Status SLA: PASS.
+
+Katakan pada Juri: "Ini bukan sekadar tempat sampah. Ini adalah sistem penilai kinerja Cleaning Service otonom bagi perusahaan."
