@@ -1,15 +1,14 @@
-Panduan Lengkap: Sistem Analitik HRD Smart Bin End-to-End
+# Panduan Lengkap: Sistem Analitik HRD Smart Bin End-to-End
 
-TAHAP 1: Persiapan Database untuk Aplikasi HRD
+## TAHAP 1: Persiapan Database untuk Aplikasi HRD
 
 Kita tidak lagi hanya membuat log, tetapi Sistem Analitik HRD. HRD butuh data jelas untuk menegur atau memberi bonus pada vendor cleaning service.
 
-Buka aplikasi DB Browser for SQLite di laptop Anda.
+1. Buka aplikasi **DB Browser for SQLite** di laptop Anda.
+2. Buat database baru bernama `smartbin_enterprise.db`.
+3. Buka tab **Execute SQL**, copy-paste kode di bawah ini, dan klik tombol **Play (Run)**. Klik **Write Changes** untuk menyimpan.
 
-Buat database baru bernama smartbin_enterprise.db.
-
-Buka tab Execute SQL, copy-paste kode di bawah ini, dan klik tombol Play (Run). Klik Write Changes untuk menyimpan.
-
+```
 -- Clean Database Schema untuk Audit HRD
 CREATE TABLE hr_performance_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,27 +19,23 @@ CREATE TABLE hr_performance_audit (
     waktu_respon_detik INTEGER NOT NULL,
     status_sla TEXT NOT NULL -- 'PASS' (Lulus) atau 'FAIL' (Terlambat)
 );
+```
 
+## TAHAP 2: Koding Hardware Wokwi (Pendekatan Clean Code & OOP)
 
-TAHAP 2: Koding Hardware Wokwi (Pendekatan Clean Code & OOP)
+Buka [Wokwi.com](https://wokwi.com "null"), buat proyek Raspberry Pi Pico (MicroPython).
 
-Buka Wokwi.com, buat proyek Raspberry Pi Pico (MicroPython).
+**Wiring Komponen:**
 
-Wiring Komponen:
+- **HC-SR04 (Ultrasonik/Volume):** TRIG ke GP3, ECHO ke GP2.
+- **Slide Potentiometer (Berat):** SIG ke GP26.
+- **Servo (Kunci Pintu):** PWM ke GP15.
+- **Push Button (RFID Petugas):** Satu kaki ke GP14, satu ke GND.
+- **LED Merah & Buzzer:** LED ke GP13, Buzzer ke GP12. Hubungkan semua VCC dan GND.
 
-HC-SR04 (Ultrasonik/Volume): TRIG ke GP3, ECHO ke GP2.
+**Kode `main.py` (Clean Code & OOP):** Hapus semua kode bawaan, paste kode di bawah ini. Perhatikan bagaimana nama fungsi dan variabel menjelaskan dirinya sendiri, sehingga komentar hanya digunakan untuk konteks bisnis.
 
-Slide Potentiometer (Berat): SIG ke GP26.
-
-Servo (Kunci Pintu): PWM ke GP15.
-
-Push Button (RFID Petugas): Satu kaki ke GP14, satu ke GND.
-
-LED Merah & Buzzer: LED ke GP13, Buzzer ke GP12. Hubungkan semua VCC dan GND.
-
-Kode main.py (Clean Code & OOP):
-Hapus semua kode bawaan, paste kode di bawah ini. Perhatikan bagaimana nama fungsi dan variabel menjelaskan dirinya sendiri, sehingga komentar hanya digunakan untuk konteks bisnis.
-
+```
 import machine
 import time
 import json
@@ -180,20 +175,17 @@ class SmartBinController:
 if __name__ == "__main__":
     bin_system = SmartBinController()
     bin_system.run_system()
+```
 
+## TAHAP 3: Koding Node-RED (Pendekatan Krug "Don't Make Me Think")
 
-TAHAP 3: Koding Node-RED (Pendekatan Krug "Don't Make Me Think")
+Buka Node-RED (`localhost:1880`). Kita akan membuat kode ES6 Class JavaScript di Function Node untuk menganalisis data, membaginya untuk UI Satpam (Operasional) dan UI HRD (Analitik).
 
-Buka Node-RED (localhost:1880). Kita akan membuat kode ES6 Class JavaScript di Function Node untuk menganalisis data, membaginya untuk UI Satpam (Operasional) dan UI HRD (Analitik).
+1. **Tarik Inject Node (Beri nama: Simulasi LORA PENUH).** Isi Payload JSON: `{"id_tong": "BIN-LOBBY-01", "status": "PENUH", "alasan": "VOLUME_MAKSIMAL", "berat_kg": 2, "jarak_cm": 10, "petugas": ""}`
+2. **Tarik Inject Node kedua (Beri nama: Simulasi LORA KOSONG).** Isi Payload JSON: `{"id_tong": "BIN-LOBBY-01", "status": "KOSONG", "alasan": "PEMBERSIHAN", "berat_kg": 0, "jarak_cm": 50, "petugas": "Siti"}`
+3. **Tarik Function Node dan letakkan kode Clean Code JavaScript ini:**
 
-Tarik Inject Node (Beri nama: Simulasi LORA PENUH). Isi Payload JSON:
-{"id_tong": "BIN-LOBBY-01", "status": "PENUH", "alasan": "VOLUME_MAKSIMAL", "berat_kg": 2, "jarak_cm": 10, "petugas": ""}
-
-Tarik Inject Node kedua (Beri nama: Simulasi LORA KOSONG). Isi Payload JSON:
-{"id_tong": "BIN-LOBBY-01", "status": "KOSONG", "alasan": "PEMBERSIHAN", "berat_kg": 0, "jarak_cm": 50, "petugas": "Siti"}
-
-Tarik Function Node dan letakkan kode Clean Code JavaScript ini:
-
+```
 class SlaAnalyzer {
     constructor(nodeMessage, nodeFlow) {
         this.payload = nodeMessage.payload;
@@ -278,44 +270,30 @@ if (analyzer.isBinFull()) {
 }
 
 return null;
+```
 
-
-TAHAP 4: Membangun UI Dashboard Node-RED (Don't Make Me Think)
+## TAHAP 4: Membangun UI Dashboard Node-RED (Don't Make Me Think)
 
 Kita akan membuat 2 Tab. Satu untuk Satpam, satu untuk Aplikasi HRD.
 
-Di Node-RED, sambungkan output 1 Function Node ke Gauge Node (Tab: Operasional).
+1. Di Node-RED, sambungkan **output 1** Function Node ke **Gauge Node** (Tab: Operasional).
+2. Sambungkan **output 1** juga ke **Text Node** (Tab: Operasional, untuk tulisan status).
+3. Sambungkan **output 2** ke **Telegram Sender Node**.
+4. Sambungkan **output 3** ke **SQLite Node** (Arahkan ke `smartbin_enterprise.db`).
+5. **Aplikasi HRD:** Buat Inject Node berulang setiap 5 detik (Timestamp) $\rightarrow$ Sambungkan ke SQLite Node dengan kueri `SELECT * FROM hr_performance_audit ORDER BY id DESC LIMIT 5;` $\rightarrow$ Sambungkan hasilnya ke `ui_table` Node (Letakkan di Tab: HRD Dashboard).
+6. Klik **Deploy**. Buka `http://localhost:1880/ui`.
 
-Sambungkan output 1 juga ke Text Node (Tab: Operasional, untuk tulisan status).
-
-Sambungkan output 2 ke Telegram Sender Node.
-
-Sambungkan output 3 ke SQLite Node (Arahkan ke smartbin_enterprise.db).
-
-Aplikasi HRD: Buat Inject Node berulang setiap 5 detik (Timestamp) $\rightarrow$ Sambungkan ke SQLite Node dengan kueri SELECT * FROM hr_performance_audit ORDER BY id DESC LIMIT 5; $\rightarrow$ Sambungkan hasilnya ke ui_table Node (Letakkan di Tab: HRD Dashboard).
-
-Klik Deploy. Buka http://localhost:1880/ui.
-
-TAHAP 5: Cara Melakukan Presentasi / Simulasi End-to-End
+## TAHAP 5: Cara Melakukan Presentasi / Simulasi End-to-End
 
 Saat Anda demo di depan orang atau juri, lakukan ini:
 
-Tunjukkan Dashboard Ops (Satpam): Buka UI Node-RED. Warnanya hijau (Aman).
-
-Mulai Simulasi Wokwi: Buka Wokwi, tekan Play.
-
-Demo Volume Penuh (Penting!): Geser slider Jarak (Ultrasonik) ke 10 cm. Berat biarkan kecil (misal 2 kg).
-
-Sebutkan ke Juri: "Seringkali pengunjung membuang kardus atau botol kosong. Beratnya ringan, tapi memakan tempat. Sensor ultrasonik kita mencegah tong luber meski belum 10kg."
-
-Tunjukkan Interaksi DOET: Tong akan terkunci otomatis, LED Merah menyala. Signifier visual yang sangat jelas bagi pengunjung bahwa tong tidak bisa dipakai.
-
-Tunjukkan Node-RED: Klik Inject Node PENUH. Dashboard Ops seketika berubah MERAH, Telegram masuk. "Satpam tidak perlu mikir, warna merah berarti ada masalah." (Prinsip Steve Krug).
-
-Demo Audit (HRD): Di Wokwi, tunggu 10 detik, lalu klik tombol (simulasi tap kartu Siti). Pintu terbuka, bunyi Beep. Geser jarak ke 50cm (kosong).
-
-Selesaikan: Klik Inject Node KOSONG di Node-RED.
-
-Pukulan Terakhir (Aplikasi HRD): Buka Tab HRD Dashboard di UI Node-RED Anda. Tunjukkan tabel yang baru saja ter-update: Siti membersihkan tong dalam 10 detik, Status SLA: PASS.
-
-Katakan pada Juri: "Ini bukan sekadar tempat sampah. Ini adalah sistem penilai kinerja Cleaning Service otonom bagi perusahaan."
+- **Tunjukkan Dashboard Ops (Satpam):** Buka UI Node-RED. Warnanya hijau (Aman).
+- **Mulai Simulasi Wokwi:** Buka Wokwi, tekan Play.
+- **Demo Volume Penuh (Penting!):** Geser slider Jarak (Ultrasonik) ke 10 cm. Berat biarkan kecil (misal 2 kg).
+- **Sebutkan ke Juri:** _"Seringkali pengunjung membuang kardus atau botol kosong. Beratnya ringan, tapi memakan tempat. Sensor ultrasonik kita mencegah tong luber meski belum 10kg."_
+- **Tunjukkan Interaksi DOET:** Tong akan terkunci otomatis, LED Merah menyala. Signifier visual yang sangat jelas bagi pengunjung bahwa tong tidak bisa dipakai.
+- **Tunjukkan Node-RED:** Klik Inject Node PENUH. Dashboard Ops seketika berubah MERAH, Telegram masuk. _"Satpam tidak perlu mikir, warna merah berarti ada masalah."_ (Prinsip Steve Krug).
+- **Demo Audit (HRD):** Di Wokwi, tunggu 10 detik, lalu klik tombol (simulasi tap kartu Siti). Pintu terbuka, bunyi Beep. Geser jarak ke 50cm (kosong).
+- **Selesaikan:** Klik Inject Node KOSONG di Node-RED.
+- **Pukulan Terakhir (Aplikasi HRD):** Buka Tab HRD Dashboard di UI Node-RED Anda. Tunjukkan tabel yang baru saja ter-update: Siti membersihkan tong dalam 10 detik, Status SLA: PASS.
+- **Katakan pada Juri:** _"Ini bukan sekadar tempat sampah. Ini adalah sistem penilai kinerja Cleaning Service otonom bagi perusahaan."_
